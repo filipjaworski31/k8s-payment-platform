@@ -1,0 +1,340 @@
+name: Docker Build, Scan & Push to ECR
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'payment-api/**'
+      - 'payment-worker/**'
+      - 'Dockerfile.api'
+      - 'Dockerfile.worker'
+      - '.github/workflows/docker-build-scan-push.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'payment-api/**'
+      - 'payment-worker/**'
+      - 'Dockerfile.api'
+      - 'Dockerfile.worker'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+  PROJECT_NAME: finpay-payment-platform
+
+permissions:
+  id-token: write   # Required for OIDC
+  contents: read    # Required for checkout
+
+jobs:
+  # ============================================
+  # Job 1: Build and Scan payment-api
+  # ============================================
+  build-scan-api:
+    name: Build & Scan payment-api
+    runs-on: ubuntu-latest
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate Docker metadata
+        id: meta
+        run: |
+          # Generate semantic version tag
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            TAG="v1.0.${{ github.run_number }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            TAG="dev-${{ github.run_number }}"
+          else
+            TAG="pr-${{ github.event.pull_request.number }}"
+          fi
+          
+          echo "tags=${TAG}" >> $GITHUB_OUTPUT
+          echo "short-sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "build-date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+
+      - name: Build payment-api image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.api
+          push: false
+          load: true
+          tags: |
+            payment-api:${{ steps.meta.outputs.tags }}
+            payment-api:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.created=${{ steps.meta.outputs.build-date }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.short-sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.tags }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: payment-api:${{ steps.meta.outputs.tags }}
+          format: 'sarif'
+          output: 'trivy-results-api.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'  # Don't fail on vulnerabilities yet
+
+      - name: Check for CRITICAL vulnerabilities
+        run: |
+          echo "Checking for CRITICAL vulnerabilities..."
+          CRITICAL_COUNT=$(docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity CRITICAL \
+            --format json \
+            payment-api:${{ steps.meta.outputs.tags }} | \
+            jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length')
+          
+          echo "CRITICAL vulnerabilities found: $CRITICAL_COUNT"
+          
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "âŒ CRITICAL vulnerabilities detected! Build failed."
+            echo "Run 'docker run aquasec/trivy image payment-api:latest' locally for details"
+            exit 1
+          else
+            echo "âœ… No CRITICAL vulnerabilities found!"
+          fi
+
+      - name: Generate Trivy report
+        if: always()
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity CRITICAL,HIGH \
+            --format table \
+            payment-api:${{ steps.meta.outputs.tags }} > trivy-report-api.txt
+          
+          echo "## í´’ Trivy Scan Results - payment-api" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat trivy-report-api.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Save image as artifact
+        if: github.event_name != 'pull_request'
+        run: |
+          docker save payment-api:${{ steps.meta.outputs.tags }} | gzip > payment-api-image.tar.gz
+
+      - name: Upload image artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: payment-api-image
+          path: payment-api-image.tar.gz
+          retention-days: 1
+
+  # ============================================
+  # Job 2: Build and Scan payment-worker
+  # ============================================
+  build-scan-worker:
+    name: Build & Scan payment-worker
+    runs-on: ubuntu-latest
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate Docker metadata
+        id: meta
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            TAG="v1.0.${{ github.run_number }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            TAG="dev-${{ github.run_number }}"
+          else
+            TAG="pr-${{ github.event.pull_request.number }}"
+          fi
+          
+          echo "tags=${TAG}" >> $GITHUB_OUTPUT
+          echo "short-sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "build-date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+
+      - name: Build payment-worker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.worker
+          push: false
+          load: true
+          tags: |
+            payment-worker:${{ steps.meta.outputs.tags }}
+            payment-worker:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.created=${{ steps.meta.outputs.build-date }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.short-sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.tags }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: payment-worker:${{ steps.meta.outputs.tags }}
+          format: 'sarif'
+          output: 'trivy-results-worker.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Check for CRITICAL vulnerabilities
+        run: |
+          echo "Checking for CRITICAL vulnerabilities..."
+          CRITICAL_COUNT=$(docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity CRITICAL \
+            --format json \
+            payment-worker:${{ steps.meta.outputs.tags }} | \
+            jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length')
+          
+          echo "CRITICAL vulnerabilities found: $CRITICAL_COUNT"
+          
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "âŒ CRITICAL vulnerabilities detected! Build failed."
+            exit 1
+          else
+            echo "âœ… No CRITICAL vulnerabilities found!"
+          fi
+
+      - name: Generate Trivy report
+        if: always()
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity CRITICAL,HIGH \
+            --format table \
+            payment-worker:${{ steps.meta.outputs.tags }} > trivy-report-worker.txt
+          
+          echo "## í´’ Trivy Scan Results - payment-worker" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat trivy-report-worker.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Save image as artifact
+        if: github.event_name != 'pull_request'
+        run: |
+          docker save payment-worker:${{ steps.meta.outputs.tags }} | gzip > payment-worker-image.tar.gz
+
+      - name: Upload image artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: payment-worker-image
+          path: payment-worker-image.tar.gz
+          retention-days: 1
+
+  # ============================================
+  # Job 3: Push to AWS ECR (only on main/develop)
+  # ============================================
+  push-to-ecr:
+    name: Push to AWS ECR
+    runs-on: ubuntu-latest
+    needs: [build-scan-api, build-scan-worker]
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    
+    steps:
+      - name: Download payment-api artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: payment-api-image
+
+      - name: Download payment-worker artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: payment-worker-image
+
+      - name: Load Docker images
+        run: |
+          docker load < payment-api-image.tar.gz
+          docker load < payment-worker-image.tar.gz
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Tag and push payment-api to ECR
+        env:
+          IMAGE_TAG: ${{ needs.build-scan-api.outputs.image-tag }}
+        run: |
+          # Tag for ECR
+          docker tag payment-api:${IMAGE_TAG} \
+            ${ECR_REGISTRY}/${PROJECT_NAME}-payment-api:${IMAGE_TAG}
+          
+          docker tag payment-api:${IMAGE_TAG} \
+            ${ECR_REGISTRY}/${PROJECT_NAME}-payment-api:latest
+          
+          # Push to ECR
+          docker push ${ECR_REGISTRY}/${PROJECT_NAME}-payment-api:${IMAGE_TAG}
+          docker push ${ECR_REGISTRY}/${PROJECT_NAME}-payment-api:latest
+          
+          echo "âœ… Pushed payment-api:${IMAGE_TAG} to ECR"
+
+      - name: Tag and push payment-worker to ECR
+        env:
+          IMAGE_TAG: ${{ needs.build-scan-worker.outputs.image-tag }}
+        run: |
+          # Tag for ECR
+          docker tag payment-worker:${IMAGE_TAG} \
+            ${ECR_REGISTRY}/${PROJECT_NAME}-payment-worker:${IMAGE_TAG}
+          
+          docker tag payment-worker:${IMAGE_TAG} \
+            ${ECR_REGISTRY}/${PROJECT_NAME}-payment-worker:latest
+          
+          # Push to ECR
+          docker push ${ECR_REGISTRY}/${PROJECT_NAME}-payment-worker:${IMAGE_TAG}
+          docker push ${ECR_REGISTRY}/${PROJECT_NAME}-payment-worker:latest
+          
+          echo "âœ… Pushed payment-worker:${IMAGE_TAG} to ECR"
+
+      - name: Deployment summary
+        run: |
+          echo "## íº€ Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Images pushed to ECR:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${ECR_REGISTRY}/${PROJECT_NAME}-payment-api:${{ needs.build-scan-api.outputs.image-tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${ECR_REGISTRY}/${PROJECT_NAME}-payment-worker:${{ needs.build-scan-worker.outputs.image-tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull commands:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${ECR_REGISTRY}/${PROJECT_NAME}-payment-api:${{ needs.build-scan-api.outputs.image-tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${ECR_REGISTRY}/${PROJECT_NAME}-payment-worker:${{ needs.build-scan-worker.outputs.image-tag }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
