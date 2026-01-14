@@ -1,0 +1,6 @@
+aws_region  = "us-east-1"
+project_name = "finpay-payment-platform"
+
+# Replace with your GitHub organization/username and repository
+github_org  = "your-github-org"
+github_repo = "k8s-payment-platform"

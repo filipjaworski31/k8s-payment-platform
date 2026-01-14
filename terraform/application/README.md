@@ -183,7 +183,3 @@ For issues or questions:
 - Check CloudWatch logs for scan results
 - Verify IAM permissions
 
----
-
-**Managed by:** FinPay DevOps Team  
-**Last Updated:** January 2026

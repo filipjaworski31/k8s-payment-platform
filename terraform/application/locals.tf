@@ -24,17 +24,17 @@ locals {
   # Lifecycle policy rules as reusable data structure
   lifecycle_rules = {
     tagged_images = {
-      priority    = 1
-      description = "Keep last ${var.image_retention_count} tagged images"
+      priority     = 1
+      description  = "Keep last ${var.image_retention_count} tagged images"
       tag_prefixes = ["v", "release", "main", "develop", "prod", "staging"]
-      count_type  = "imageCountMoreThan"
+      count_type   = "imageCountMoreThan"
       count_number = var.image_retention_count
     }
     untagged_images = {
-      priority    = 2
-      description = "Remove untagged images older than ${var.untagged_image_retention_days} days"
-      count_type  = "sinceImagePushed"
-      count_unit  = "days"
+      priority     = 2
+      description  = "Remove untagged images older than ${var.untagged_image_retention_days} days"
+      count_type   = "sinceImagePushed"
+      count_unit   = "days"
       count_number = var.untagged_image_retention_days
     }
   }
