@@ -1,0 +1,45 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE
+.idea
+*.iml
+.vscode
+*.swp
+*.swo
+*~
+
+# Maven
+**/target
+*.jar
+*.war
+!payment-api/target/payment-api-*.jar
+!payment-worker/target/payment-worker-*.jar
+
+# Documentation
+*.md
+docs/
+
+# CI/CD
+.github/
+
+# Terraform
+terraform/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Test files
+**/test
+**/*Test.java
+**/*Tests.java
